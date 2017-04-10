@@ -139,3 +139,7 @@ type Pusher interface {
 	// is not supported on the underlying connection.
 	Push(target string, opts *PushOptions) error
 }
+
+type Originator interface {
+	AddOrigin(san string) error
+}

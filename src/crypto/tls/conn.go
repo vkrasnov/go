@@ -52,6 +52,10 @@ type Conn struct {
 	// verifiedChains contains the certificate chains that we built, as
 	// opposed to the ones presented by the server.
 	verifiedChains [][]*x509.Certificate
+	// DNSNames aggregates all the Subject Alternate Name values covered
+	// by the connection, either from the original certificate, or from
+	// certificates delivered via the certificate frame
+	DNSNames map[string]bool
 	// serverName contains the server name indicated by the client, if any.
 	serverName string
 	// secureRenegotiation is true if the server echoed the secure

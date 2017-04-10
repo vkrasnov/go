@@ -247,6 +247,16 @@ Curves:
 		}
 	}
 
+	if x509Cert, err := x509.ParseCertificate(hs.cert.Certificate[0]); err == nil {
+		c.DNSNames = make(map[string]bool)
+		if len(x509Cert.Subject.CommonName) > 0 {
+			c.DNSNames[x509Cert.Subject.CommonName] = true
+		}
+		for _, san := range x509Cert.DNSNames {
+			c.DNSNames[san] = true
+		}
+	}
+
 	if hs.checkForResumption() {
 		return true, nil
 	}

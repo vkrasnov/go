@@ -664,6 +664,7 @@ const (
 	http2FrameGoAway       http2FrameType = 0x7
 	http2FrameWindowUpdate http2FrameType = 0x8
 	http2FrameContinuation http2FrameType = 0x9
+	http2FrameOrigin       http2FrameType = 0xb
 )
 
 var http2frameName = map[http2FrameType]string{
@@ -677,6 +678,7 @@ var http2frameName = map[http2FrameType]string{
 	http2FrameGoAway:       "GOAWAY",
 	http2FrameWindowUpdate: "WINDOW_UPDATE",
 	http2FrameContinuation: "CONTINUATION",
+	http2FrameOrigin:       "ORIGIN",
 }
 
 func (t http2FrameType) String() string {
@@ -1794,6 +1796,14 @@ func (f *http2Framer) WriteContinuation(streamID uint32, endHeaders bool, header
 	return f.endWrite()
 }
 
+// An OriginFrame is used to witelist a set of origins over
+// an established HTTP/2 connection
+// See https://datatracker.ietf.org/doc/draft-ietf-httpbis-origin-frame
+type http2OriginFrame struct {
+	http2FrameHeader
+	origin string
+}
+
 // A PushPromiseFrame is used to initiate a server stream.
 // See http://http2.github.io/http2-spec/#rfc.section.6.6
 type http2PushPromiseFrame struct {
@@ -2294,6 +2304,69 @@ func (w *http2responseWriter) Push(target string, opts *PushOptions) error {
 		internalOpts.Header = opts.Header
 	}
 	return w.push(target, internalOpts)
+}
+
+// Origin errors.
+var (
+	http2ErrOriginFrameOverHTTP = errors.New("http2: origin frame not allowed over http")
+	http2ErrOriginFrameSent     = errors.New("http2: origin frame for SAN already sent")
+	http2ErrOriginSanMissing    = errors.New("http2: origin frame SAN not covered by certificate")
+)
+
+type http2OriginWriteRequest struct {
+	san string
+}
+
+func (s http2OriginWriteRequest) writeFrame(ctx http2writeContext) error {
+	return ctx.Framer().WriteOrigin(s)
+}
+
+func (s http2OriginWriteRequest) staysWithinBuffer(max int) bool {
+	return http2frameHeaderLen+2+len(s.san) <= max
+}
+
+// AddOrigin implements http.Originator.
+func (w *http2responseWriter) AddOrigin(san string) error {
+	st := w.rws.stream
+	sc := st.sc
+	sc.serveG.checkNotOn()
+
+	if w.rws.req.TLS == nil {
+		return http2ErrOriginFrameOverHTTP
+	}
+
+	if _, ok := sc.dnsNamesSent[san]; ok {
+		return http2ErrOriginFrameSent
+	}
+
+	// This is technically a race?
+	sc.dnsNamesSent[san] = true
+
+	tlsConn := sc.conn.(*tls.Conn)
+
+	san = strings.ToLower(san)
+
+	if _, ok := tlsConn.DNSNames[san]; !ok {
+		if dot := strings.Index(san, "."); dot == -1 {
+			return http2ErrOriginSanMissing
+		} else if _, ok = tlsConn.DNSNames["*"+san[dot:]]; !ok {
+			return http2ErrOriginSanMissing
+		}
+	}
+
+	sc.writeFrame(http2FrameWriteRequest{
+		write: http2OriginWriteRequest{san: "https://" + san},
+	},
+	)
+
+	return nil
+}
+
+func (f *http2Framer) WriteOrigin(o http2OriginWriteRequest) error {
+	f.startWrite(http2FrameOrigin, 0, 0)
+	f.writeUint16(uint16(len(o.san)))
+	f.writeBytes([]byte(o.san))
+	return f.endWrite()
 }
 
 func http2configureServer18(h1 *Server, h2 *http2Server) error {
@@ -3284,6 +3357,7 @@ func (s *http2Server) ServeConn(c net.Conn, opts *http2ServeConnOpts) {
 		headerTableSize:             http2initialHeaderTableSize,
 		serveG:                      http2newGoroutineLock(),
 		pushEnabled:                 true,
+		dnsNamesSent:                make(map[string]bool),
 	}
 
 	if sc.hs.WriteTimeout != 0 {
@@ -3395,6 +3469,9 @@ type http2serverConn struct {
 	// Owned by the writeFrameAsync goroutine:
 	headerWriteBuf bytes.Buffer
 	hpackEncoder   *hpack.Encoder
+
+	// For origin frames
+	dnsNamesSent map[string]bool
 }
 
 func (sc *http2serverConn) maxHeaderListSize() uint32 {
